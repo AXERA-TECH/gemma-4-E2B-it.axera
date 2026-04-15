@@ -1,0 +1,11 @@
+{
+  "model_type": "gemma4_vision_projector",
+  "resize_h": 336,
+  "resize_w": 480,
+  "patch_size": 16,
+  "patch_count": 630,
+  "pixel_dim": 768,
+  "expected_tokens": 70,
+  "hidden_size": 1536,
+  "onnx_path": "vit-models/gemma4_vision_h336_w480_t70.onnx"
+}

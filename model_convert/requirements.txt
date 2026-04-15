@@ -1,0 +1,13 @@
+# Verified for export_onnx.py / prepare_calibration.py
+# Python 3.12
+transformers==5.5.0
+torch==2.11.0
+onnx==1.19.0
+onnxruntime==1.23.1
+safetensors==0.6.2
+numpy==1.26.4
+Pillow==11.3.0
+
+# Optional: only needed when passing --optimize to export_onnx.py
+# onnxsim
+# onnxslim==0.1.71
