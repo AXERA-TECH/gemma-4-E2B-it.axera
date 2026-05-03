@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import wave
 
 import numpy as np
 import torch
@@ -103,25 +105,86 @@ def load_image(image_path: str | Path) -> Image.Image:
     return Image.open(image_path).convert("RGB")
 
 
+def _resample_waveform(waveform: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+    # Linear interpolation; introduces aliasing when downsampling (e.g. 44.1kHz -> 16kHz).
+    # For best quality pass mono 16kHz WAV and skip this path; otherwise librosa.load
+    # with its polyphase resampler is preferred.
+    if src_rate == dst_rate or waveform.size == 0:
+        return waveform.astype(np.float32)
+
+    src_positions = np.arange(waveform.shape[0], dtype=np.float32) / float(src_rate)
+    dst_length = max(1, int(round(waveform.shape[0] * float(dst_rate) / float(src_rate))))
+    dst_positions = np.arange(dst_length, dtype=np.float32) / float(dst_rate)
+    return np.interp(dst_positions, src_positions, waveform).astype(np.float32)
+
+
+def load_audio_waveform(audio_path: str | Path, sampling_rate: int = 16000) -> np.ndarray:
+    audio_path = Path(audio_path)
+    if audio_path.suffix.lower() == ".wav":
+        with wave.open(str(audio_path), "rb") as wav_file:
+            if wav_file.getcomptype() != "NONE":
+                raise ValueError(f"Unsupported WAV compression type: {wav_file.getcomptype()}")
+
+            channels = wav_file.getnchannels()
+            sample_width = wav_file.getsampwidth()
+            src_rate = wav_file.getframerate()
+            frames = wav_file.readframes(wav_file.getnframes())
+
+        if sample_width == 1:
+            waveform = np.frombuffer(frames, dtype=np.uint8).astype(np.float32)
+            waveform = (waveform - 128.0) / 128.0
+        elif sample_width == 2:
+            waveform = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+        elif sample_width == 4:
+            waveform = np.frombuffer(frames, dtype="<i4").astype(np.float32) / 2147483648.0
+        else:
+            raise ValueError(f"Unsupported WAV sample width: {sample_width}")
+
+        if channels > 1:
+            waveform = waveform.reshape(-1, channels).mean(axis=1)
+        waveform = _resample_waveform(waveform, src_rate=src_rate, dst_rate=sampling_rate)
+        return np.asarray(np.clip(waveform, -1.0, 1.0), dtype=np.float32)
+
+    try:
+        os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
+        os.environ.setdefault("NUMBA_CACHE_DIR", "/tmp/numba_cache")
+        import librosa
+    except Exception as exc:
+        raise RuntimeError(
+            "Non-WAV audio loading requires librosa. Please convert the input to a mono 16kHz WAV file."
+        ) from exc
+
+    waveform, _ = librosa.load(str(audio_path), sr=sampling_rate, mono=True)
+    return np.asarray(waveform, dtype=np.float32)
+
+
 def resize_image(image: Image.Image, resize_h: int, resize_w: int) -> Image.Image:
     return image.convert("RGB").resize((resize_w, resize_h), resample=Image.BICUBIC)
 
 
-def build_messages(prompt: str, image: Image.Image | None = None, system_prompt: str = "") -> list[dict]:
+def build_messages(
+    prompt: str,
+    image: Image.Image | None = None,
+    audio=None,
+    system_prompt: str = "",
+) -> list[dict]:
     messages: list[dict] = []
     if system_prompt.strip():
         messages.append({"role": "system", "content": system_prompt})
 
-    if image is None:
+    if image is None and audio is None:
         messages.append({"role": "user", "content": prompt})
     else:
+        user_content = []
+        if audio is not None:
+            user_content.append({"type": "audio", "audio": audio})
+        if image is not None:
+            user_content.append({"type": "image", "image": image})
+        user_content.append({"type": "text", "text": prompt})
         messages.append(
             {
                 "role": "user",
-                "content": [
-                    {"type": "image", "image": image},
-                    {"type": "text", "text": prompt},
-                ],
+                "content": user_content,
             }
         )
     return messages
@@ -130,6 +193,7 @@ def build_messages(prompt: str, image: Image.Image | None = None, system_prompt:
 def build_processor_messages(
     prompt: str,
     image: Image.Image | None = None,
+    audio=None,
     system_prompt: str = "",
     history=None,
 ) -> list[dict]:
@@ -157,6 +221,8 @@ def build_processor_messages(
             messages.append({"role": "assistant", "content": bot_msg})
 
     user_content = []
+    if audio is not None:
+        user_content.append({"type": "audio", "audio": audio})
     if image is not None:
         user_content.append({"type": "image", "image": image})
     user_content.append({"type": "text", "text": prompt})
@@ -261,23 +327,105 @@ def prepare_multimodal_inputs(
     }
 
 
-def replace_image_tokens(token_ids, token_embeds, image_embeds, image_token_id: int):
-    image_positions = [idx for idx, token_id in enumerate(token_ids) if int(token_id) == int(image_token_id)]
-    if not image_positions:
+def prepare_audio_inputs(
+    processor,
+    audio_path: str | Path,
+    prompt: str,
+    system_prompt: str = "",
+    enable_thinking: bool = False,
+    audio_duration_sec: float = 30.0,
+    fixed_audio_tokens: int | None = None,
+):
+    sampling_rate = int(getattr(processor.feature_extractor, "sampling_rate", 16000))
+    max_length = int(round(audio_duration_sec * sampling_rate))
+    waveform = load_audio_waveform(audio_path, sampling_rate=sampling_rate)
+
+    if waveform.shape[0] < max_length:
+        padded_waveform = np.pad(waveform, (0, max_length - waveform.shape[0]), mode="constant")
+    else:
+        padded_waveform = waveform[:max_length]
+
+    messages = build_processor_messages(prompt=prompt, audio=padded_waveform, system_prompt=system_prompt)
+    inputs = _safe_apply_chat_template(
+        processor,
+        messages,
+        tokenize=True,
+        return_dict=True,
+        return_tensors="pt",
+        add_generation_prompt=True,
+        enable_thinking=enable_thinking,
+        processor_kwargs={
+            "audio_kwargs": {
+                "padding": "max_length",
+                "max_length": max_length,
+                "truncation": True,
+                "pad_to_multiple_of": None,
+            }
+        },
+    )
+
+    audio_token_id = processor.audio_token_id
+    audio_token_count = int((inputs["input_ids"] == audio_token_id).sum().item())
+    expected_tokens = int(fixed_audio_tokens or processor.audio_seq_length)
+    if audio_token_count != expected_tokens:
+        raise ValueError(
+            f"Expected {expected_tokens} audio soft tokens from fixed audio preprocessing, got {audio_token_count}."
+        )
+
+    return {
+        "messages": messages,
+        "waveform": waveform,
+        "padded_waveform": padded_waveform,
+        "inputs": inputs,
+        "audio_duration_sec": audio_duration_sec,
+        "expected_tokens": expected_tokens,
+    }
+
+
+def replace_special_tokens(
+    token_ids,
+    token_embeds,
+    modality_embeds,
+    special_token_id: int,
+    modality_name: str,
+):
+    positions = [idx for idx, token_id in enumerate(token_ids) if int(token_id) == int(special_token_id)]
+    if not positions:
         return token_embeds
 
-    flat_image_embeds = image_embeds.reshape(-1, image_embeds.shape[-1])
-    if len(image_positions) != flat_image_embeds.shape[0]:
+    flat_embeds = modality_embeds.reshape(-1, modality_embeds.shape[-1])
+    if len(positions) != flat_embeds.shape[0]:
         raise ValueError(
-            f"Image tokens and image features do not match: tokens={len(image_positions)}, "
-            f"features={flat_image_embeds.shape[0]}"
+            f"{modality_name.capitalize()} tokens and features do not match: "
+            f"tokens={len(positions)}, features={flat_embeds.shape[0]}"
         )
-    if token_embeds.shape[-1] != flat_image_embeds.shape[-1]:
+    if token_embeds.shape[-1] != flat_embeds.shape[-1]:
         raise ValueError(
-            f"Embedding dim mismatch: token_dim={token_embeds.shape[-1]}, image_dim={flat_image_embeds.shape[-1]}"
+            f"Embedding dim mismatch: token_dim={token_embeds.shape[-1]}, "
+            f"{modality_name}_dim={flat_embeds.shape[-1]}"
         )
-    token_embeds[image_positions, :] = flat_image_embeds
+    token_embeds[positions, :] = flat_embeds
     return token_embeds
+
+
+def replace_image_tokens(token_ids, token_embeds, image_embeds, image_token_id: int):
+    return replace_special_tokens(
+        token_ids,
+        token_embeds,
+        image_embeds,
+        special_token_id=image_token_id,
+        modality_name="image",
+    )
+
+
+def replace_audio_tokens(token_ids, token_embeds, audio_embeds, audio_token_id: int):
+    return replace_special_tokens(
+        token_ids,
+        token_embeds,
+        audio_embeds,
+        special_token_id=audio_token_id,
+        modality_name="audio",
+    )
 
 
 def to_numpy_fp32(tensor_like) -> np.ndarray:

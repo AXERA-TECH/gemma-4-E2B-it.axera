@@ -13,6 +13,7 @@ def load_text_runtime_config(model_dir: str):
     text_config = dict(raw_config.get("text_config") or raw_config)
     text_config["model_type"] = text_config.get("model_type", "gemma4_text")
     text_config["eos_token_id"] = raw_config.get("eos_token_id", text_config.get("eos_token_id"))
+    text_config["audio_token_id"] = raw_config.get("audio_token_id")
     text_config["image_token_id"] = raw_config.get("image_token_id")
     text_config["vision_config"] = raw_config.get("vision_config")
     text_config["vision_soft_tokens_per_image"] = raw_config.get("vision_soft_tokens_per_image")

@@ -1,3 +1,4 @@
+import atexit
 import os
 import re
 
@@ -5,6 +6,23 @@ import numpy as np
 from axengine import InferenceSession
 from ml_dtypes import bfloat16
 from tqdm import tqdm
+
+
+def release_ax_inference_session(session):
+    inner = getattr(session, "_sess", None)
+    unload = getattr(inner, "_unload", None)
+    if not callable(unload):
+        return
+
+    try:
+        unload()
+    except Exception as exc:
+        print(f"[WARN] Failed to unload axengine session cleanly: {exc}")
+    finally:
+        try:
+            inner._unload = lambda: None
+        except Exception:
+            pass
 
 
 def _layer_head_dim(config, layer_idx: int) -> int:
@@ -31,6 +49,28 @@ def _build_shared_kv_source_layers(config):
         layer_type = layer_types[layer_idx]
         source_layers[layer_idx] = len(prev_layers) - 1 - prev_layers[::-1].index(layer_type)
     return source_layers
+
+
+def detect_prefill_len(model_dir: str, default: int = 128) -> int:
+    """Auto-detect prefill_len (aka slice_len) from axmodel filenames.
+
+    Matches files named like ``<prefix>_p<N>_l<idx>_together.axmodel`` and returns
+    ``N``. Falls back to ``default`` when no layer files match.
+    """
+    layer_pattern = re.compile(r"^.*_p(?P<prefill>\d+)_l\d+_together\.axmodel$")
+    prefill_counts = {}
+    try:
+        for fname in os.listdir(model_dir):
+            match = layer_pattern.match(fname)
+            if match:
+                prefill = int(match.group("prefill"))
+                prefill_counts[prefill] = prefill_counts.get(prefill, 0) + 1
+    except FileNotFoundError:
+        return default
+
+    if not prefill_counts:
+        return default
+    return max(prefill_counts.items(), key=lambda kv: kv[1])[0]
 
 
 def _find_axmodel_files(base_dir: str, expected_layers: int = None, expected_prefill: int = 128):
@@ -105,7 +145,25 @@ class InferManager:
         if post_file is None:
             raise FileNotFoundError("Cannot find post process .axmodel file in model_dir")
         self.post_process_session = InferenceSession(os.path.join(model_dir, post_file))
+        self._closed = False
+        atexit.register(self.close)
         print("Model loaded successfully!")
+
+    def close(self):
+        if self._closed:
+            return
+
+        sessions = list(getattr(self, "decoder_sessions", []))
+        post_process_session = getattr(self, "post_process_session", None)
+        if post_process_session is not None:
+            sessions.append(post_process_session)
+
+        for session in sessions:
+            release_ax_inference_session(session)
+
+        self.decoder_sessions = []
+        self.post_process_session = None
+        self._closed = True
 
     @staticmethod
     def _compute_mm_group_ids(mm_token_type_ids):
@@ -113,12 +171,12 @@ class InferManager:
             return None
 
         mm_token_type_ids = np.asarray(mm_token_type_ids, dtype=np.int32).reshape(-1)
-        is_vision = np.isin(mm_token_type_ids, (1, 2))
-        prev_is_vision = np.roll(is_vision, 1)
-        prev_is_vision[0] = False
-        new_group_starts = is_vision & ~prev_is_vision
+        is_multimodal = np.isin(mm_token_type_ids, (1, 2, 3))
+        prev_is_multimodal = np.roll(is_multimodal, 1)
+        prev_is_multimodal[0] = False
+        new_group_starts = is_multimodal & ~prev_is_multimodal
         group_ids = np.cumsum(new_group_starts.astype(np.int32)) - 1
-        group_ids[~is_vision] = -1
+        group_ids[~is_multimodal] = -1
         return group_ids
 
     @staticmethod
@@ -136,7 +194,7 @@ class InferManager:
             if start // slice_len != end // slice_len:
                 num_slices = end // slice_len - start // slice_len + 1
                 print(
-                    f"[WARN] Image token block (group_id={group_id}, pos {start}-{end}) "
+                    f"[WARN] Multimodal token block (group_id={group_id}, pos {start}-{end}) "
                     f"spans {num_slices} prefill slices. Bidirectional attention within "
                     f"earlier slices is partial (chunked prefill limitation)."
                 )
@@ -340,7 +398,7 @@ class InferManager:
         if mm_token_type_ids is None:
             return True
         token_type = int(mm_token_type_ids[token_pos])
-        return token_type not in (1, 2)
+        return token_type not in (1, 2, 3)
 
     @staticmethod
     def _build_decode_mask(cache_len: int, visible_past_tokens: int):
