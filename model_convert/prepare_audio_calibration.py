@@ -49,7 +49,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Prepare Gemma 4 audio calibration inputs")
     parser.add_argument("--model_path", type=str, default="../gemma-4-hf-original/gemma-4-E2B-it",
                         help="Path to the original Gemma 4 model directory")
-    parser.add_argument("--audio_dir", type=str, default="../assets/gemma4_audio_test.mp3",
+    parser.add_argument("--audio_dir", type=str, default="../assets",
                         help="Path to an audio file, a directory of audio files, or a tar archive")
     parser.add_argument("--output_dir", type=str, default="./datasets/gemma4_audio_calibration",
                         help="Directory used for intermediate .npy files")

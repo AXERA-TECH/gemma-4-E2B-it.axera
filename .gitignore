@@ -7,8 +7,11 @@ build-output/
 *.bin
 *.npy
 *.axmodel
+*.axmodel.synth.bak
+*.synth.tar.bak
 *_axmodel/
 *.safetensors
 compiled*
 build*
 *tmp/
+.agent_docs/
