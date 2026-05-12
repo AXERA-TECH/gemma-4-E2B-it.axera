@@ -163,6 +163,19 @@ python3 infer_axmodel.py \
 - 如果你自己生成了其他分辨率 / soft token 组合，请同时保证 VIT 模型、预处理分辨率和 soft token 数一致
 - `140` 和 `280` profile 会看到跨 prefill slice 的告警，这是当前 chunked prefill 实现下的已知提示，不代表命令执行失败
 
+示例输出（`70` soft tokens，节选）：
+
+```text
+Model loaded successfully!
+slice_indices: [0]
+Slice prefill done: 0
+answer >> 这是一张女性的肖像照片，她有着非常柔和、甜美的外表。
+
+**人物特征：**
+* **面部：** 她的五官精致，眼睛大而明亮，表情看起来比较平静或略带微笑。
+* **发型：** 她留着一头浅灰色或银灰色的长发，发丝柔顺，披散在肩上。
+```
+
 ### 音频推理
 
 本仓库提供两组已经验证过的 Audio profile：
@@ -219,6 +232,16 @@ python3 infer_axmodel.py \
 
 - `5s` / `30s` profile 在当前 `slice_len=128` 配置下都会打印多模态跨 slice 告警；其中 `30s` 还会额外提示 `audio_tokens=750 exceeds slice_len=128`，这属于当前实现下的预期现象
 - `gemma4_audio_test_chunk0_30s.wav` 是一个 `30s` 分块样本，转写结果停在句子中间属于正常现象
+
+示例输出（`5s` profile，节选）：
+
+```text
+Model loaded successfully!
+slice_indices: [0, 1]
+Slice prefill done: 0
+Slice prefill done: 1
+answer >> When I was seventeen, I read a quote that went something like if you
+```
 
 如果你只想复现 Audio encoder 的单模型耗时，可以直接在板端执行：
 
