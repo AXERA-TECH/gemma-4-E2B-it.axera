@@ -70,15 +70,32 @@ python/
 
 ```bash
 export PYDEPS_DIR=/path/to/python_deps
-export PYTHONPATH="$PYDEPS_DIR:$PYTHONPATH"
+export PYTHONPATH="${PYDEPS_DIR:+$PYDEPS_DIR:}$PYTHONPATH"
 ```
 
 上面的 `PYDEPS_DIR` 由用户自行决定；README 不假设任何固定私有路径。
 如果依赖已经直接安装到当前 Python 环境，可以跳过这一步。
 
+### 3. 多模态依赖预检查
+
+文本模式只依赖 tokenizer/config；图像、音频和 Gradio Demo 额外依赖 `AutoProcessor.from_pretrained(...)` 可以正确加载 Gemma 4 多模态 processor。
+
+在仓库根目录执行：
+
+```bash
+python3 - <<'PY'
+from transformers import AutoProcessor
+AutoProcessor.from_pretrained("python/gemma-4-E2B-it", trust_remote_code=True)
+print("Gemma 4 AutoProcessor: OK")
+PY
+```
+
+如果这一步报错 `Unrecognized processing class`，说明当前 `transformers` 环境还不能运行 Gemma 4 多模态命令；此时文本推理仍可执行，但图像、音频和 Gradio Demo 需要先切换到兼容的依赖环境。
+
 ## 板端复现
 
 以下命令默认在仓库根目录执行，并且板端已经可以访问本仓库文件。
+CLI 脚本和 Gradio Demo 首次启动时会预加载 `35` 个 LLM 子模型；在 AX650 板端通常需要先等待几十秒到数分钟，随后才会看到 `Model loaded successfully!` 或 Gradio 监听地址。
 
 ### 文本推理
 
@@ -109,7 +126,7 @@ python3 infer_axmodel.py \
 
 ```bash
 cd python
-export PYTHONPATH="$PYDEPS_DIR:$PYTHONPATH"
+export PYTHONPATH="${PYDEPS_DIR:+$PYDEPS_DIR:}$PYTHONPATH"
 
 # 70 soft tokens（默认推荐）
 python3 infer_axmodel.py \
@@ -141,8 +158,10 @@ python3 infer_axmodel.py \
 
 说明：
 
+- 执行前请先通过上面的 [多模态依赖预检查](#3-多模态依赖预检查)
 - 当 `--vit_model_path` 文件名中带有 `t70 / t140 / t280` 时，脚本会自动推断 `max_soft_tokens`
 - 如果你自己生成了其他分辨率 / soft token 组合，请同时保证 VIT 模型、预处理分辨率和 soft token 数一致
+- `140` 和 `280` profile 会看到跨 prefill slice 的告警，这是当前 chunked prefill 实现下的已知提示，不代表命令执行失败
 
 ### 音频推理
 
@@ -167,7 +186,7 @@ assets/
 
 ```bash
 cd python
-export PYTHONPATH="$PYDEPS_DIR:$PYTHONPATH"
+export PYTHONPATH="${PYDEPS_DIR:+$PYDEPS_DIR:}$PYTHONPATH"
 
 # 5s profile
 python3 infer_axmodel.py \
@@ -194,6 +213,13 @@ python3 infer_axmodel.py \
   --max_new_tokens 256
 ```
 
+执行前请先通过上面的 [多模态依赖预检查](#3-多模态依赖预检查)。
+
+说明：
+
+- `5s` / `30s` profile 在当前 `slice_len=128` 配置下都会打印多模态跨 slice 告警；其中 `30s` 还会额外提示 `audio_tokens=750 exceeds slice_len=128`，这属于当前实现下的预期现象
+- `gemma4_audio_test_chunk0_30s.wav` 是一个 `30s` 分块样本，转写结果停在句子中间属于正常现象
+
 如果你只想复现 Audio encoder 的单模型耗时，可以直接在板端执行：
 
 ```bash
@@ -202,13 +228,20 @@ cd python/audio_models
 /opt/bin/ax_run_model -m gemma4_audio_30s.axmodel -w 1 -r 5
 ```
 
+在当前 AX650 验证板上的一次实测结果为：
+
+- `gemma4_audio_5s.axmodel`: `avg = 29.112 ms`
+- `gemma4_audio_30s.axmodel`: `avg = 171.255 ms`
+
+实际耗时会随板端频率配置和系统负载波动。
+
 ### Gradio 图文 Demo
 
 Gradio Demo 仅支持文本和单图输入，不支持音频。
 
 ```bash
 cd python
-export PYTHONPATH="$PYDEPS_DIR:$PYTHONPATH"
+export PYTHONPATH="${PYDEPS_DIR:+$PYDEPS_DIR:}$PYTHONPATH"
 
 python3 gradio_demo.py \
   --hf_model gemma-4-E2B-it \
@@ -221,6 +254,8 @@ python3 gradio_demo.py \
 - host: `0.0.0.0`
 - port: `7860`
 
+执行前请先通过上面的 [多模态依赖预检查](#3-多模态依赖预检查)。
+首次启动会先加载 LLM 与 VIT 模型，等待时间通常明显长于文本 CLI。
 启动后可通过 `http://<board-ip>:7860` 访问。
 
 示例界面：
