@@ -178,7 +178,7 @@ python export_audio_onnx.py \
 - `audio-models/gemma4_audio_5s.onnx` 与 `audio-models/gemma4_audio_5s.json`
 - `audio-models/gemma4_audio_30s.onnx` 与 `audio-models/gemma4_audio_30s.json`
 
-## 下载 Vision calibration 图像
+## 下载 calibration 数据集
 
 在 `model_convert/` 目录执行:
 
@@ -186,9 +186,32 @@ python export_audio_onnx.py \
 bash download_dataset.sh
 ```
 
-该脚本会下载 `datasets/imagenet-calib.tar` (原始 calibration 图像压缩包).
+默认情况下，该脚本会从当前仓库 GitHub Release 的 `calibration` tag 下载 `gemma4-calibration-datasets.tar`，并解压生成以下文件：
+
+```text
+datasets/
+├── imagenet-calib.tar
+├── gemma4_vision_h336_w480_t70_calibration.tar
+├── gemma4_vision_h480_w672_t140_calibration.tar
+├── gemma4_vision_h672_w960_t280_calibration.tar
+├── gemma4_audio_5s_calibration.tar
+└── gemma4_audio_30s_calibration.tar
+```
+
+其中：
+
+- `imagenet-calib.tar` 用于重新生成 Vision calibration 数据
+- 其余 5 个 `*_calibration.tar` 可直接用于当前 `pulsar2_configs/*.json` 的量化编译流程
+
+如果你上传 release 时使用了不同的 tag 或 asset 名称，也可以通过环境变量覆盖默认值：
+
+```bash
+DATASET_RELEASE_TAG=<tag> DATASET_ASSET_NAME=<asset-name> bash download_dataset.sh
+```
 
 ## 生成 Vision 校准数据
+
+如果你只是要复现当前仓库的编译流程，而不是重新生成 Vision calibration 数据，可以跳过本节，直接使用 `download_dataset.sh` 下载得到的 `datasets/gemma4_vision_*_calibration.tar`。
 
 在 `model_convert/` 目录执行:
 
