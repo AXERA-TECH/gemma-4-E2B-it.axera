@@ -16,6 +16,7 @@ model_convert/
 ├── README.md
 ├── requirements.txt
 ├── download_dataset.sh
+├── convert_gemma4_to_gptq.py        # GPTQ-INT4 量化辅助脚本
 ├── export_onnx.py                   # Vision ONNX 导出
 ├── export_audio_onnx.py             # Audio ONNX 导出
 ├── prepare_calibration.py           # Vision 校准数据生成
@@ -186,7 +187,7 @@ python export_audio_onnx.py \
 bash download_dataset.sh
 ```
 
-默认情况下，该脚本会从当前仓库 GitHub Release 的 `calibration` tag 下载 `gemma4-calibration-datasets.tar`，并解压生成以下文件：
+该脚本会自动从当前仓库发布页下载 calibration 数据集包，并解压生成以下文件：
 
 ```text
 datasets/
@@ -202,12 +203,6 @@ datasets/
 
 - `imagenet-calib.tar` 用于重新生成 Vision calibration 数据
 - 其余 5 个 `*_calibration.tar` 可直接用于当前 `pulsar2_configs/*.json` 的量化编译流程
-
-如果你上传 release 时使用了不同的 tag 或 asset 名称，也可以通过环境变量覆盖默认值：
-
-```bash
-DATASET_RELEASE_TAG=<tag> DATASET_ASSET_NAME=<asset-name> bash download_dataset.sh
-```
 
 ## 生成 Vision 校准数据
 
@@ -389,6 +384,7 @@ de4c5174  store logs file in ./logs, not in root dir (#2865)
 ```bash
 export GPTQ_WORKDIR=/path/to/hfmodel_gptq
 export GPTQMODEL_SRC=/path/to/GPTQModel
+export GEMMA4_AXERA_REPO=/path/to/gemma-4-E2B-it.axera
 export HF_MODEL_ORIG=/path/to/gemma-4-E2B-it
 export GPTQ_OUT_DIR=/path/to/gemma-4-E2B-it-gptq-int4-official-mmcalib-axera-compatible
 export IMAGE_CALIB_TAR=/path/to/imagenet-calib.tar
@@ -397,9 +393,11 @@ export IMAGE_CALIB_TAR=/path/to/imagenet-calib.tar
 其中：
 
 - `GPTQ_WORKDIR`
-  保存 `convert_gemma4_to_gptq.py` 等量化辅助脚本的工作目录
+  GPTQ 量化工作目录
 - `GPTQMODEL_SRC`
   官方 GPTQModel 仓库源码目录
+- `GEMMA4_AXERA_REPO`
+  当前仓库根目录, 其中包含 `model_convert/convert_gemma4_to_gptq.py`
 - `HF_MODEL_ORIG`
   原始 Hugging Face Gemma 4 权重目录，必须包含完整模型权重，而不是 tokenizer-only 目录
 - `GPTQ_OUT_DIR`
@@ -407,21 +405,11 @@ export IMAGE_CALIB_TAR=/path/to/imagenet-calib.tar
 - `IMAGE_CALIB_TAR`
   图像 calibration tar 包路径，可自定义
 
-另外还需要准备一个本地量化包装脚本：
-
-```text
-convert_gemma4_to_gptq.py
-```
-
-该脚本应放在 `"$GPTQ_WORKDIR"` 根目录下，与量化命令在同一工作目录执行。
-
 如果你使用当前仓库自带的 calibration 文件，推荐直接把 `IMAGE_CALIB_TAR` 指向：
 
 ```text
 model_convert/datasets/imagenet-calib.tar
 ```
-
-如果 GPTQ 流程在外部工作目录执行，也可以先把这份文件复制到自己的 GPTQ 工作目录，再设置 `IMAGE_CALIB_TAR`。
 
 ### 量化输入与输出
 
@@ -464,7 +452,7 @@ export PYTHONPATH="$GPTQMODEL_SRC"
 export GPTQMODEL_DISABLE_GEMMA4_FORWARD_PATCH=1
 export CUDA_VISIBLE_DEVICES=0
 
-python convert_gemma4_to_gptq.py \
+python "$GEMMA4_AXERA_REPO/model_convert/convert_gemma4_to_gptq.py" \
   --model_id "$HF_MODEL_ORIG" \
   --out_dir "$GPTQ_OUT_DIR" \
   --bits 4 \
@@ -483,8 +471,8 @@ python convert_gemma4_to_gptq.py \
 
 前提说明：
 
-- 上面的命令依赖 `GPTQ_WORKDIR` 中存在 `convert_gemma4_to_gptq.py`
-- `--skip_per_layer_adapter_quant` 是当前本地包装脚本 `convert_gemma4_to_gptq.py` 提供的开关，不是 upstream GPTQModel 原生命令行参数
+- 上面的命令依赖当前仓库中的 `model_convert/convert_gemma4_to_gptq.py`
+- `--skip_per_layer_adapter_quant` 是当前仓库辅助脚本 `convert_gemma4_to_gptq.py` 提供的开关，不属于官方 GPTQModel 原生命令行参数
 
 如果目标输出目录已经包含 `quantize_done.txt`，脚本会跳过量化。
 要从头复现，请使用新的 `GPTQ_OUT_DIR`，或者先把已有输出目录移走。
@@ -498,7 +486,7 @@ python convert_gemma4_to_gptq.py \
 - `--image_calib_path` / `--image_calib_size`
   在文本 calibration 之外引入多模态 calibration 样本，使量化过程覆盖 image-after-text-history 场景。
 - `--skip_per_layer_adapter_quant`
-  这是当前本地包装脚本 `convert_gemma4_to_gptq.py` 提供的开关。该开关会把以下 Gemma4 模块排除在 GPTQ qlinear 之外：
+  这是当前仓库辅助脚本 `convert_gemma4_to_gptq.py` 提供的开关。该开关会把以下 Gemma4 模块排除在 GPTQ qlinear 之外：
 
 ```text
 model.language_model.layers.*.per_layer_input_gate

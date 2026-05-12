@@ -42,7 +42,7 @@
 
 ```text
 python/
-├── gemma-4-E2B-it/                             # tokenizer / config / processor 相关文件，不含原始 safetensors
+├── gemma-4-E2B-it/                             # tokenizer / config / processor 相关文件
 ├── gemma-4-E2B-it_axmodel/                     # 默认 LLM 运行目录
 ├── vit_models/
 │   ├── gemma4_vision_h336_w480_t70.axmodel
