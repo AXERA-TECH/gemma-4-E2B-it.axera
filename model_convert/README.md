@@ -1,6 +1,13 @@
-# gemma-4-E2B-it Vision / Audio 模型转换
+# gemma-4-E2B-it 模型转换与量化
 
-本文档描述 `google/gemma-4-E2B-it` 的 Vision / Audio 分支在 AXERA 平台上的导出、校准与编译流程.
+本文档描述 `google/gemma-4-E2B-it` 在 AXERA 平台上的开发侧工作流，覆盖以下内容：
+
+- Vision ONNX 导出、校准与编译
+- Audio ONNX 导出、校准与编译
+- GPTQ-INT4（AXERA-compatible）量化训练
+- LLM `pulsar2 llm_build` 编译
+
+本文档默认面向开发者使用，所有命令默认在 `model_convert/` 目录下执行。
 
 ## 目录说明
 
@@ -43,7 +50,7 @@ model_convert/
 
 ## 环境准备
 
-本文档中的命令均在以下环境下验证:
+Vision / Audio 导出与校准相关命令在以下环境下验证:
 
 - Python `3.12`
 - `transformers==5.5.0`
@@ -61,7 +68,21 @@ python -m pip install -r requirements.txt
 python -m pip install onnxsim onnxslim
 ```
 
-下文所有脚本默认以 `model_convert/` 为当前工作目录. 原始 Gemma 4 HF 权重目录由用户自行准备, 用 `$HF_MODEL` 引用; 下载方式见 [导出 Vision ONNX](#导出-vision-onnx).
+下文所有脚本默认以 `model_convert/` 为当前工作目录。
+原始 Gemma 4 HF 权重目录由用户自行准备，用 `$HF_MODEL` 引用；下载方式见 [导出 Vision ONNX](#导出-vision-onnx)。
+
+## 推荐顺序
+
+如果你的目标是复现完整流程，建议按下面顺序执行：
+
+1. 准备原始 Hugging Face 权重目录
+2. 导出 Vision / Audio ONNX
+3. 生成 Vision / Audio calibration 数据
+4. 编译 Vision / Audio axmodel
+5. 根据需要选择：
+   - 直接使用原始 Hugging Face 权重执行 `pulsar2 llm_build`
+   - 先做 GPTQ-INT4 量化训练，再对 GPTQ 检查点执行 `pulsar2 llm_build`
+6. 将最终产物同步到 `../python/` 运行目录
 
 ## 已验证精度
 
@@ -307,6 +328,192 @@ pulsar2 build \
 - `compiled_output_audio_5s/compiled.axmodel`
 - `compiled_output_audio_30s/compiled.axmodel`
 
+## GPTQ-INT4 量化训练（AXERA-compatible）
+
+这一节记录当前已验证的 `Gemma 4 E2B` GPTQ-INT4 训练方法，用于生成后续 `4bit` LLM 编译输入。
+该流程通常在独立的 GPTQ 工作目录中执行，而不是直接在当前仓库内完成。
+
+### 量化环境
+
+建议先准备单独的 GPTQ Python 环境，并安装 `transformers`、`datasets`、`torch` 等依赖。
+如果你使用 conda，可以采用如下形式：
+
+```bash
+conda activate gptq
+unset PYTHONHOME
+```
+
+官方 GPTQModel 仓库可通过以下方式获取：
+
+```bash
+git clone https://github.com/ModelCloud/GPTQModel
+```
+
+本次验证使用的官方 GPTQModel 提交为：
+
+```text
+de4c51747d74d277ea7b75afbb94490ba6d10a48
+```
+
+简写：
+
+```text
+de4c5174  store logs file in ./logs, not in root dir (#2865)
+```
+
+下面的命令使用几个约定变量：
+
+```bash
+export GPTQ_WORKDIR=/path/to/hfmodel_gptq
+export GPTQMODEL_SRC=/path/to/GPTQModel
+export HF_MODEL_ORIG=/path/to/gemma-4-E2B-it
+export GPTQ_OUT_DIR=/path/to/gemma-4-E2B-it-gptq-int4-official-mmcalib-axera-compatible
+export IMAGE_CALIB_TAR=/path/to/imagenet-calib.tar
+```
+
+其中：
+
+- `GPTQ_WORKDIR`
+  保存 `convert_gemma4_to_gptq.py` 等量化辅助脚本的工作目录
+- `GPTQMODEL_SRC`
+  官方 GPTQModel 仓库源码目录
+- `HF_MODEL_ORIG`
+  原始 Hugging Face Gemma 4 权重目录，必须包含完整模型权重，而不是 tokenizer-only 目录
+- `GPTQ_OUT_DIR`
+  GPTQ-INT4 输出目录，可自定义
+- `IMAGE_CALIB_TAR`
+  图像 calibration tar 包路径，可自定义
+
+另外还需要准备一个本地量化包装脚本：
+
+```text
+convert_gemma4_to_gptq.py
+```
+
+该脚本应放在 `"$GPTQ_WORKDIR"` 根目录下，与量化命令在同一工作目录执行。
+
+如果你使用当前仓库自带的 calibration 文件，推荐直接把 `IMAGE_CALIB_TAR` 指向：
+
+```text
+model_convert/datasets/imagenet-calib.tar
+```
+
+如果 GPTQ 流程在外部工作目录执行，也可以先把这份文件复制到自己的 GPTQ 工作目录，再设置 `IMAGE_CALIB_TAR`。
+
+### 量化输入与输出
+
+原始模型输入应指向完整 Hugging Face 权重目录，例如：
+
+```text
+$HF_MODEL_ORIG
+```
+
+不要把 tokenizer-only 目录作为 `--model_id` 输入。
+
+GPTQ-INT4 输出目录可由用户自行指定，例如：
+
+```text
+$GPTQ_OUT_DIR
+```
+
+量化配置要点：
+
+- `bits=4`
+- `group_size=128`
+- 文本 calibration：`wikitext / wikitext-2-raw-v1 / train`
+- 文本 calibration 样本数：`2048`
+- 图像 calibration：`$IMAGE_CALIB_TAR`
+- 图像 calibration 样本数：`512`
+- 图像分辨率：`336x480`
+- 额外约束：Gemma4 per-layer adapter 模块保持 dense，不参与 GPTQ qlinear 化
+
+### 量化命令
+
+在 `GPTQ_WORKDIR` 目录执行：
+
+```bash
+cd "$GPTQ_WORKDIR"
+
+conda activate gptq
+unset PYTHONHOME
+
+export PYTHONPATH="$GPTQMODEL_SRC"
+export GPTQMODEL_DISABLE_GEMMA4_FORWARD_PATCH=1
+export CUDA_VISIBLE_DEVICES=0
+
+python convert_gemma4_to_gptq.py \
+  --model_id "$HF_MODEL_ORIG" \
+  --out_dir "$GPTQ_OUT_DIR" \
+  --bits 4 \
+  --group_size 128 \
+  --calib_size 2048 \
+  --batch_size 2 \
+  --skip_eval \
+  --calibration_concat_size 512 \
+  --calibration_concat_separator $'\n\n' \
+  --image_calib_path "$IMAGE_CALIB_TAR" \
+  --image_calib_size 512 \
+  --image_calib_height 336 \
+  --image_calib_width 480 \
+  --skip_per_layer_adapter_quant
+```
+
+前提说明：
+
+- 上面的命令依赖 `GPTQ_WORKDIR` 中存在 `convert_gemma4_to_gptq.py`
+- `--skip_per_layer_adapter_quant` 是当前本地包装脚本 `convert_gemma4_to_gptq.py` 提供的开关，不是 upstream GPTQModel 原生命令行参数
+
+如果目标输出目录已经包含 `quantize_done.txt`，脚本会跳过量化。
+要从头复现，请使用新的 `GPTQ_OUT_DIR`，或者先把已有输出目录移走。
+
+### 关键参数说明
+
+- `PYTHONPATH="$GPTQMODEL_SRC"`
+  选择当前验证通过的官方 GPTQModel 源码目录。
+- `GPTQMODEL_DISABLE_GEMMA4_FORWARD_PATCH=1`
+  禁用 `convert_gemma4_to_gptq.py` 内较老的本地 Gemma4 forward monkey-patch，改由官方 GPTQModel Gemma4 实现处理量化 replay。
+- `--image_calib_path` / `--image_calib_size`
+  在文本 calibration 之外引入多模态 calibration 样本，使量化过程覆盖 image-after-text-history 场景。
+- `--skip_per_layer_adapter_quant`
+  这是当前本地包装脚本 `convert_gemma4_to_gptq.py` 提供的开关。该开关会把以下 Gemma4 模块排除在 GPTQ qlinear 之外：
+
+```text
+model.language_model.layers.*.per_layer_input_gate
+model.language_model.layers.*.per_layer_projection
+```
+
+这是当前 AXERA Gemma4 导出 / 运行链路的约束：per-layer adapter 相关权重需要保持 dense，并以 sidecar 形式单独导出。
+
+### 量化结果检查
+
+量化输出目录应至少包含：
+
+```text
+chat_template.jinja
+config.json
+generation_config.json
+model-00001-of-00003.safetensors
+model-00002-of-00003.safetensors
+model-00003-of-00003.safetensors
+model.safetensors.index.json
+quantize_config.json
+quantize_done.txt
+quant_log.csv
+tokenizer_config.json
+tokenizer.json
+```
+
+建议检查 `"$GPTQ_OUT_DIR/quantize_config.json"` 中的 `dynamic` 排除规则是否存在：
+
+```json
+{
+  "-:.*\\.per_layer_input_gate$": {},
+  "-:.*\\.per_layer_projection$": {}
+}
+```
+
+如果缺少这两条规则，则当前 GPTQ 检查点不满足 AXERA-compatible 约束。
+
 ## 拷贝到推理目录
 
 Vision 编译完成后, 将产物拷贝到推理目录并重命名:
@@ -327,13 +534,30 @@ cp compiled_output_audio_5s/compiled.axmodel ../python/audio_models/gemma4_audio
 cp compiled_output_audio_30s/compiled.axmodel ../python/audio_models/gemma4_audio_30s.axmodel
 ```
 
-## LLM 编译 (1k prefill + 1k decoding)
+## 编译 LLM axmodel（原始 HF / GPTQ-INT4）
 
-LLM 编译依赖 `pulsar2 llm_build` 工具. 下面的命令假设 `$HF_MODEL` 指向原始 HF 模型目录 (参见 [导出 Vision ONNX](#导出-vision-onnx)):
+LLM 编译依赖 `pulsar2 llm_build` 工具。
+
+这一节有两种输入来源：
+
+- 原始 Hugging Face 权重目录：适用于默认高精度工作流
+- GPTQ-INT4 检查点目录：适用于 `4bit` 工作流
+
+推荐先设置两个变量：
+
+```bash
+# 原始 HF 权重
+export LLM_SRC_BF16="$HF_MODEL"
+
+# GPTQ-INT4 检查点
+export LLM_SRC_GPTQ="$GPTQ_OUT_DIR"
+```
+
+### 编译原始 HF 权重
 
 ```bash
 FLOAT_MATMUL_USE_CONV_EU=1 pulsar2 llm_build \
-  --input_path "$HF_MODEL" \
+  --input_path "$LLM_SRC_BF16" \
   --output_path gemma-4-E2B-it_axmodel/ \
   --hidden_state_type bf16 \
   --prefill_len 128 \
@@ -351,7 +575,30 @@ FLOAT_MATMUL_USE_CONV_EU=1 pulsar2 llm_build \
   --parallel 1
 ```
 
-说明:
+### 编译 GPTQ-INT4 检查点
+
+```bash
+FLOAT_MATMUL_USE_CONV_EU=1 pulsar2 llm_build \
+  --input_path "$LLM_SRC_GPTQ" \
+  --output_path gemma-4-E2B-it-4bit_axmodel/ \
+  --hidden_state_type bf16 \
+  --prefill_len 128 \
+  --kv_cache_len 2047 \
+  --last_kv_cache_len 128 \
+  --last_kv_cache_len 256 \
+  --last_kv_cache_len 384 \
+  --last_kv_cache_len 512 \
+  --last_kv_cache_len 640 \
+  --last_kv_cache_len 768 \
+  --last_kv_cache_len 896 \
+  --last_kv_cache_len 1024 \
+  --chip AX650 \
+  -c 0 \
+  --parallel 1
+```
+
+说明：
 
 - `FLOAT_MATMUL_USE_CONV_EU=1` 在 AX650 系列上可显著提升 TTFT, 建议保留.
 - `--parallel` 控制编译并行度. 如果机器性能充足, 可以设置为 `35` (对应 35 个 decoder layer), 可大幅提升编译速度; 性能不足时保留 `1`.
+- 如果你希望编译结果直接进入运行目录，也可以把 `--output_path` 直接改成 `../python/gemma-4-E2B-it_axmodel/` 或 `../python/gemma-4-E2B-it-4bit_axmodel/`。
